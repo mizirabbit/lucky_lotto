@@ -17,7 +17,7 @@ from lotto_core import (
 st.set_page_config(
     page_title="로또 5게임 분산 생성기",
     page_icon="🎯",
-    layout="wide",
+    layout="centered",
 )
 
 st.title("로또 5게임 분산 생성기")
