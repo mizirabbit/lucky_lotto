@@ -186,31 +186,109 @@ latest_date = pd.Timestamp(latest["date"]).date()
 
 score_table = build_score_table(history, weights=weights)
 
-m1, m2, m3, m4 = st.columns([1, 1.8, 1, 1])
-m1.metric("최신 회차", f"{latest_draw:,}회")
-m2.metric("최신 추첨일", latest_date.isoformat())
-m3.metric("분석 회차", f"{len(history):,}회")
-m4.metric("데이터", "자동 수집" if source == "online" else "CSV")
+# 상단 요약 영역: Streamlit metric 대신 고정 비율 카드로 표시
+data_label = "자동 수집" if source == "online" else "CSV"
+
+st.markdown(
+    f"""
+    <style>
+    .lotto-summary-grid {{
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 10px;
+        margin: 0.45rem 0 1.45rem 0;
+    }}
+    .lotto-summary-card {{
+        border: 1px solid rgba(49, 51, 63, 0.16);
+        border-radius: 10px;
+        padding: 12px 14px;
+        min-width: 0;
+        background: rgba(250, 250, 250, 0.35);
+    }}
+    .lotto-summary-label {{
+        font-size: 0.78rem;
+        line-height: 1.2;
+        color: rgba(49, 51, 63, 0.68);
+        margin-bottom: 6px;
+        white-space: nowrap;
+    }}
+    .lotto-summary-value {{
+        font-size: 1.42rem;
+        line-height: 1.2;
+        font-weight: 600;
+        letter-spacing: -0.02em;
+        white-space: nowrap;
+    }}
+    .lotto-formula-note {{
+        font-size: 0.92rem;
+        line-height: 1.65;
+        margin: 0.15rem 0 0.9rem 0;
+        color: rgba(49, 51, 63, 0.88);
+    }}
+    @media (max-width: 700px) {{
+        .lotto-summary-grid {{
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+        }}
+        .lotto-summary-value {{
+            font-size: 1.28rem;
+        }}
+    }}
+    </style>
+
+    <div class="lotto-summary-grid">
+        <div class="lotto-summary-card">
+            <div class="lotto-summary-label">최신 회차</div>
+            <div class="lotto-summary-value">{latest_draw:,}회</div>
+        </div>
+        <div class="lotto-summary-card">
+            <div class="lotto-summary-label">최신 추첨일</div>
+            <div class="lotto-summary-value">{latest_date.isoformat()}</div>
+        </div>
+        <div class="lotto-summary-card">
+            <div class="lotto-summary-label">분석 회차</div>
+            <div class="lotto-summary-value">{len(history):,}회</div>
+        </div>
+        <div class="lotto-summary-card">
+            <div class="lotto-summary-label">데이터</div>
+            <div class="lotto-summary-value">{data_label}</div>
+        </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
 st.subheader("현재 점수 공식")
+
 st.latex(
     r"S(n)="
     + f"{weights['all']:.2f}A(n)+"
     + f"{weights['year']:.2f}Y(n)+"
     + f"{weights['recent20']:.2f}R_{{20}}(n)"
 )
-st.write(
-    "A, Y, R20은 각각 **전체 누적 / 최근 1년 / 최근 20회**에서의 "
-    "번호 출현빈도를 1-45번 사이의 **백분위 점수(0-1)**로 변환한 값입니다."
+st.markdown(
+    """
+    <div class="lotto-formula-note">
+    <b>A</b>, <b>Y</b>, <b>R20</b>은 각각
+    <b>전체 누적 / 최근 1년 / 최근 20회</b>의 출현빈도를
+    1-45번 내 상대 백분위 점수(0-1)로 변환한 값입니다.
+    </div>
+    """,
+    unsafe_allow_html=True,
 )
+
 st.latex(
     r"S_{\mathrm{select}}(n)=S(n)\times "
     + f"{repeat_factor:.2f}"
     + r"^{u(n)}"
 )
-st.write(
-    f"`u(n)`은 앞선 게임들에서 해당 번호를 사용한 횟수입니다. "
-    f"현재 설정에서는 한 번호를 최대 **{max_usage}게임**까지만 사용할 수 있습니다."
+st.markdown(
+    f"""
+    <div class="lotto-formula-note">
+    <b>u(n)</b>은 앞선 게임에서 해당 번호를 사용한 횟수입니다.
+    현재 설정에서는 같은 번호를 최대 <b>{max_usage}게임</b>까지 사용할 수 있습니다.
+    </div>
+    """,
+    unsafe_allow_html=True,
 )
 
 st.divider()
