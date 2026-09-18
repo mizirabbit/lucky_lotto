@@ -8,7 +8,13 @@ import numpy as np
 import pandas as pd
 import requests
 
-API_URL = "https://www.dhlottery.co.kr/lt645/selectPstLt645Info.do"
+# Streamlit Community Cloud에서는 동행복권 서버가 연결 타임아웃/차단될 수 있어
+# GitHub Pages의 공개 미러를 1차 데이터 소스로 사용합니다.
+MIRROR_ALL_URL = "https://smok95.github.io/lotto/results/all.json"
+
+# 동행복권 웹사이트 내부 JSON 경로 (공식 공개 API는 아님)
+OFFICIAL_API_URL = "https://www.dhlottery.co.kr/lt645/selectPstLt645Info.do"
+
 REQUEST_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -29,33 +35,63 @@ DEFAULT_WEIGHTS = {
 NUMBER_COLUMNS = ["n1", "n2", "n3", "n4", "n5", "n6"]
 
 
-def fetch_lotto_history(timeout: float = 20.0) -> pd.DataFrame:
-    """
-    동행복권 웹페이지에서 현재 사용하는 내부 JSON 경로를 통해
-    1회~최신 회차 데이터를 한 번에 가져온다.
-
-    공식 공개 API는 아니므로 사이트 구조 변경 시 수정이 필요할 수 있다.
-    """
+def _history_from_mirror(timeout: float = 15.0) -> pd.DataFrame:
     response = requests.get(
-        API_URL,
+        MIRROR_ALL_URL,
+        headers={"User-Agent": REQUEST_HEADERS["User-Agent"]},
+        timeout=timeout,
+    )
+    response.raise_for_status()
+    payload = response.json()
+
+    if not isinstance(payload, list) or not payload:
+        raise RuntimeError("미러 응답이 올바른 리스트 형식이 아닙니다.")
+
+    rows = []
+    for item in payload:
+        try:
+            numbers = item["numbers"]
+            if not isinstance(numbers, list) or len(numbers) != 6:
+                raise ValueError("numbers 형식 오류")
+
+            row = {
+                "draw": int(item["draw_no"]),
+                "date": pd.to_datetime(item["date"], utc=True).tz_convert(None),
+                "n1": int(numbers[0]),
+                "n2": int(numbers[1]),
+                "n3": int(numbers[2]),
+                "n4": int(numbers[3]),
+                "n5": int(numbers[4]),
+                "n6": int(numbers[5]),
+                "bonus": int(item["bonus_no"]),
+            }
+        except (KeyError, TypeError, ValueError, IndexError) as exc:
+            raise RuntimeError(f"알 수 없는 미러 데이터 형식: {item!r}") from exc
+
+        _validate_row(row)
+        rows.append(row)
+
+    df = pd.DataFrame(rows)
+    return (
+        df.drop_duplicates(subset=["draw"], keep="last")
+        .sort_values("draw")
+        .reset_index(drop=True)
+    )
+
+
+def _history_from_official(timeout: float = 15.0) -> pd.DataFrame:
+    response = requests.get(
+        OFFICIAL_API_URL,
         params={"srchLtEpsd": "all"},
         headers=REQUEST_HEADERS,
         timeout=timeout,
     )
     response.raise_for_status()
 
-    content_type = response.headers.get("content-type", "")
-    if "json" not in content_type.lower():
-        preview = response.text[:200].replace("\n", " ")
-        raise RuntimeError(
-            "동행복권 서버가 JSON이 아닌 응답을 반환했습니다: "
-            f"{content_type!r}, body={preview!r}"
-        )
-
     payload = response.json()
     raw_list = payload.get("data", {}).get("list")
     if not isinstance(raw_list, list) or not raw_list:
-        raise RuntimeError("응답 JSON에서 data.list를 찾지 못했습니다.")
+        raise RuntimeError("동행복권 응답 JSON에서 data.list를 찾지 못했습니다.")
 
     rows = []
     for item in raw_list:
@@ -72,19 +108,44 @@ def fetch_lotto_history(timeout: float = 20.0) -> pd.DataFrame:
                 "bonus": int(item["bnsWnNo"]),
             }
         except (KeyError, TypeError, ValueError) as exc:
-            raise RuntimeError(f"알 수 없는 당첨 데이터 형식: {item!r}") from exc
+            raise RuntimeError(f"알 수 없는 동행복권 데이터 형식: {item!r}") from exc
 
         _validate_row(row)
         rows.append(row)
 
     df = pd.DataFrame(rows)
-    df = df.drop_duplicates(subset=["draw"], keep="last").sort_values("draw")
-    df = df.reset_index(drop=True)
+    return (
+        df.drop_duplicates(subset=["draw"], keep="last")
+        .sort_values("draw")
+        .reset_index(drop=True)
+    )
 
-    if df.empty:
-        raise RuntimeError("유효한 당첨 데이터가 없습니다.")
 
-    return df
+def fetch_lotto_history(timeout: float = 15.0) -> pd.DataFrame:
+    """
+    1차: GitHub Pages 공개 미러
+    2차: 동행복권 내부 JSON 경로
+
+    Streamlit Community Cloud에서 동행복권 서버 연결이 차단/지연되는
+    경우가 있어 미러를 우선 사용합니다.
+    """
+    errors = []
+
+    try:
+        df = _history_from_mirror(timeout=timeout)
+        if not df.empty:
+            return df
+    except Exception as exc:
+        errors.append(f"GitHub 미러 실패: {exc}")
+
+    try:
+        df = _history_from_official(timeout=timeout)
+        if not df.empty:
+            return df
+    except Exception as exc:
+        errors.append(f"동행복권 실패: {exc}")
+
+    raise RuntimeError(" / ".join(errors))
 
 
 def parse_uploaded_csv(data: bytes) -> pd.DataFrame:
@@ -155,10 +216,6 @@ def _frequency(df: pd.DataFrame) -> pd.Series:
 
 
 def _percentile(values: pd.Series) -> pd.Series:
-    """
-    빈도 자체는 기간마다 스케일이 다르므로 1~45 번호 내 상대 순위를 0~1로 변환.
-    동일 빈도는 평균 순위를 공유한다.
-    """
     rank = values.rank(method="average", ascending=True)
     if len(values) <= 1:
         return pd.Series(0.5, index=values.index)
@@ -216,7 +273,6 @@ def build_score_table(
         }
     )
 
-    # 화면에서는 0~100 점수로 표시한다.
     smin = out["score_raw"].min()
     smax = out["score_raw"].max()
     if smax > smin:
@@ -237,18 +293,6 @@ def generate_portfolio(
     trials: int = 600,
     seed: int | None = None,
 ):
-    """
-    기본 점수:
-        S = 0.30 * 전체백분위 + 0.40 * 1년백분위 + 0.30 * 최근20회백분위
-
-    게임 간 재사용 점수:
-        S_select(n) = S(n) * repeat_factor ** usage(n)
-
-    max_usage를 넘는 번호는 후보에서 제외한다.
-
-    여러 후보 포트폴리오를 만들고,
-    기본점수 합이 높으면서 중복 자리가 적은 포트폴리오를 선택한다.
-    """
     if games <= 0 or numbers_per_game <= 0:
         raise ValueError("games와 numbers_per_game은 양수여야 합니다.")
     if not 0 < repeat_factor <= 1:
@@ -273,9 +317,7 @@ def generate_portfolio(
         usage = Counter()
         candidate_games = [[] for _ in range(games)]
 
-        # 한 게임을 먼저 다 채우지 않고 round-robin으로 배치해
-        # 높은 점수 번호가 특정 게임에 몰리는 것을 줄인다.
-        for slot in range(numbers_per_game):
+        for _slot in range(numbers_per_game):
             order = rng.permutation(games)
             for game_idx in order:
                 current = set(candidate_games[game_idx])
@@ -290,8 +332,6 @@ def generate_portfolio(
                 for n in candidates:
                     base = max(scores[n], 1e-6)
                     value = base * (repeat_factor ** usage[n])
-
-                    # 랜덤성은 점수의 의미를 지우지 않도록 작은 로그노이즈로 적용.
                     if randomness > 0:
                         value *= float(np.exp(rng.normal(0.0, randomness)))
                     adjusted.append(max(value, 1e-12))
@@ -307,14 +347,8 @@ def generate_portfolio(
 
         base_sum = sum(scores[n] for g in candidate_games for n in g)
         repeat_slots = sum(max(0, c - 1) for c in usage.values())
-
-        # 중복은 목적함수에서도 한 번 더 감점한다.
-        # repeat_factor가 작을수록 중복 패널티를 강하게 한다.
         repeat_penalty = (1.0 - repeat_factor) * repeat_slots * 0.35
-
-        # 서로 다른 번호 수가 많을수록 소폭 보너스.
         unique_bonus = len(usage) * 0.01
-
         objective = base_sum - repeat_penalty + unique_bonus
 
         if objective > best_obj:
@@ -326,10 +360,7 @@ def generate_portfolio(
 
     games_out, usage = best
     all_selected = [n for g in games_out for n in g]
-    repeated = {
-        n: c for n, c in sorted(usage.items())
-        if c > 1
-    }
+    repeated = {n: c for n, c in sorted(usage.items()) if c > 1}
 
     meta = {
         "unique_numbers": len(set(all_selected)),
