@@ -1,7 +1,11 @@
 from __future__ import annotations
 
-import io
+import base64
+import hmac
 from datetime import timedelta
+from zoneinfo import ZoneInfo
+
+import requests
 
 import pandas as pd
 import streamlit as st
@@ -71,6 +75,83 @@ with st.sidebar:
         help="0에 가까울수록 점수 순위 중심, 높을수록 결과가 다양해집니다.",
     )
 
+
+def get_github_config():
+    """Streamlit Secrets에서 GitHub 저장 설정을 읽습니다."""
+    try:
+        if "github" not in st.secrets:
+            return None
+        cfg = st.secrets["github"]
+        required = ("token", "owner", "repo", "branch", "password")
+        if any(key not in cfg or not str(cfg[key]).strip() for key in required):
+            return None
+        return {key: str(cfg[key]).strip() for key in required}
+    except (FileNotFoundError, KeyError):
+        return None
+
+
+def save_weekly_csv_to_github(
+    csv_bytes: bytes,
+    path: str,
+    commit_message: str,
+    cfg: dict,
+) -> tuple[bool, str]:
+    """
+    GitHub Contents API로 CSV를 생성/갱신합니다.
+    같은 path가 이미 있으면 SHA를 읽어 update 합니다.
+    """
+    api_url = (
+        f"https://api.github.com/repos/"
+        f"{cfg['owner']}/{cfg['repo']}/contents/{path}"
+    )
+    headers = {
+        "Authorization": f"Bearer {cfg['token']}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": "lucky-lotto-streamlit",
+    }
+
+    sha = None
+    check = requests.get(
+        api_url,
+        headers=headers,
+        params={"ref": cfg["branch"]},
+        timeout=15,
+    )
+
+    if check.status_code == 200:
+        sha = check.json().get("sha")
+    elif check.status_code != 404:
+        return False, (
+            f"GitHub 파일 확인 실패: HTTP {check.status_code} - "
+            f"{check.text[:300]}"
+        )
+
+    payload = {
+        "message": commit_message,
+        "content": base64.b64encode(csv_bytes).decode("ascii"),
+        "branch": cfg["branch"],
+    }
+    if sha:
+        payload["sha"] = sha
+
+    response = requests.put(
+        api_url,
+        headers=headers,
+        json=payload,
+        timeout=20,
+    )
+
+    if response.status_code not in (200, 201):
+        return False, (
+            f"GitHub 저장 실패: HTTP {response.status_code} - "
+            f"{response.text[:500]}"
+        )
+
+    action = "갱신" if sha else "생성"
+    return True, f"`{path}` 파일을 GitHub에 {action}했습니다."
+
+
 @st.cache_data(ttl="1h", show_spinner=False)
 def load_online_history() -> pd.DataFrame:
     return fetch_lotto_history()
@@ -105,7 +186,7 @@ latest_date = pd.Timestamp(latest["date"]).date()
 
 score_table = build_score_table(history, weights=weights)
 
-m1, m2, m3, m4 = st.columns(4)
+m1, m2, m3, m4 = st.columns([1, 1.8, 1, 1]))
 m1.metric("최신 회차", f"{latest_draw:,}회")
 m2.metric("최신 추첨일", latest_date.isoformat())
 m3.metric("분석 회차", f"{len(history):,}회")
@@ -120,7 +201,7 @@ st.latex(
 )
 st.write(
     "A, Y, R20은 각각 **전체 누적 / 최근 1년 / 최근 20회**에서의 "
-    "번호 출현빈도를 1-45번 사이의 백분위 점수(0~1)로 변환한 값입니다."
+    "번호 출현빈도를 1-45번 사이의 **백분위 점수(0-1)**로 변환한 값입니다."
 )
 st.latex(
     r"S_{\mathrm{select}}(n)=S(n)\times "
@@ -193,13 +274,83 @@ with left:
                 }
             )
         export_df = pd.DataFrame(export_rows)
-        st.download_button(
-            "이번 주 번호 CSV 저장",
-            data=export_df.to_csv(index=False).encode("utf-8-sig"),
-            file_name=f"lotto_{latest_draw}_games.csv",
-            mime="text/csv",
-            use_container_width=True,
-        )
+
+        # 저장 시점과 생성 조건도 함께 남깁니다.
+        generated_date = pd.Timestamp.now(tz=ZoneInfo("Asia/Seoul")).date()
+        export_df.insert(0, "generated_date", generated_date.isoformat())
+        export_df["all_weight"] = round(weights["all"], 4)
+        export_df["year_weight"] = round(weights["year"], 4)
+        export_df["recent20_weight"] = round(weights["recent20"], 4)
+        export_df["repeat_factor"] = repeat_factor
+        export_df["max_usage"] = max_usage
+        export_df["randomness"] = randomness
+
+        csv_bytes = export_df.to_csv(index=False).encode("utf-8-sig")
+        iso_year, iso_week, _ = generated_date.isocalendar()
+        week_key = f"{iso_year}-W{iso_week:02d}"
+        weekly_filename = f"{week_key}_based_on_draw_{latest_draw}.csv"
+        github_path = f"history/{weekly_filename}"
+
+        dl_col, git_col = st.columns(2)
+
+        with dl_col:
+            st.download_button(
+                "이번 주 번호 CSV 저장",
+                data=csv_bytes,
+                file_name=weekly_filename,
+                mime="text/csv",
+                use_container_width=True,
+            )
+
+        with git_col:
+            github_cfg = get_github_config()
+
+            if github_cfg is None:
+                st.button(
+                    "GitHub에 저장",
+                    disabled=True,
+                    use_container_width=True,
+                    help="Streamlit Secrets에 GitHub 설정을 먼저 등록해야 합니다.",
+                )
+            else:
+                save_password = st.text_input(
+                    "GitHub 저장 비밀번호",
+                    type="password",
+                    key="github_save_password",
+                    placeholder="저장 비밀번호",
+                    label_visibility="collapsed",
+                )
+
+                if st.button(
+                    "GitHub에 저장",
+                    use_container_width=True,
+                    type="secondary",
+                ):
+                    if not hmac.compare_digest(
+                        save_password,
+                        github_cfg["password"],
+                    ):
+                        st.error("저장 비밀번호가 맞지 않습니다.")
+                    else:
+                        commit_message = (
+                            f"Save lotto games for {week_key} "
+                            f"(based on draw {latest_draw})"
+                        )
+                        try:
+                            ok, message = save_weekly_csv_to_github(
+                                csv_bytes=csv_bytes,
+                                path=github_path,
+                                commit_message=commit_message,
+                                cfg=github_cfg,
+                            )
+                        except requests.RequestException as exc:
+                            ok = False
+                            message = f"GitHub 연결 오류: {exc}"
+
+                        if ok:
+                            st.success(message)
+                        else:
+                            st.error(message)
 
 with right:
     st.subheader("번호 점수 TOP 15")
