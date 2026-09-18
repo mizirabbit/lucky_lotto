@@ -186,7 +186,7 @@ latest_date = pd.Timestamp(latest["date"]).date()
 
 score_table = build_score_table(history, weights=weights)
 
-m1, m2, m3, m4 = st.columns([1, 1.8, 1, 1]))
+m1, m2, m3, m4 = st.columns([1, 1.8, 1, 1])
 m1.metric("최신 회차", f"{latest_draw:,}회")
 m2.metric("최신 추첨일", latest_date.isoformat())
 m3.metric("분석 회차", f"{len(history):,}회")
