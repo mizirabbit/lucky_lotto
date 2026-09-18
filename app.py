@@ -1,12 +1,5 @@
 from __future__ import annotations
 
-import base64
-import hmac
-from datetime import timedelta
-from zoneinfo import ZoneInfo
-
-import requests
-
 import pandas as pd
 import streamlit as st
 
@@ -76,82 +69,6 @@ with st.sidebar:
     )
 
 
-def get_github_config():
-    """Streamlit Secrets에서 GitHub 저장 설정을 읽습니다."""
-    try:
-        if "github" not in st.secrets:
-            return None
-        cfg = st.secrets["github"]
-        required = ("token", "owner", "repo", "branch", "password")
-        if any(key not in cfg or not str(cfg[key]).strip() for key in required):
-            return None
-        return {key: str(cfg[key]).strip() for key in required}
-    except (FileNotFoundError, KeyError):
-        return None
-
-
-def save_weekly_csv_to_github(
-    csv_bytes: bytes,
-    path: str,
-    commit_message: str,
-    cfg: dict,
-) -> tuple[bool, str]:
-    """
-    GitHub Contents API로 CSV를 생성/갱신합니다.
-    같은 path가 이미 있으면 SHA를 읽어 update 합니다.
-    """
-    api_url = (
-        f"https://api.github.com/repos/"
-        f"{cfg['owner']}/{cfg['repo']}/contents/{path}"
-    )
-    headers = {
-        "Authorization": f"Bearer {cfg['token']}",
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-        "User-Agent": "lucky-lotto-streamlit",
-    }
-
-    sha = None
-    check = requests.get(
-        api_url,
-        headers=headers,
-        params={"ref": cfg["branch"]},
-        timeout=15,
-    )
-
-    if check.status_code == 200:
-        sha = check.json().get("sha")
-    elif check.status_code != 404:
-        return False, (
-            f"GitHub 파일 확인 실패: HTTP {check.status_code} - "
-            f"{check.text[:300]}"
-        )
-
-    payload = {
-        "message": commit_message,
-        "content": base64.b64encode(csv_bytes).decode("ascii"),
-        "branch": cfg["branch"],
-    }
-    if sha:
-        payload["sha"] = sha
-
-    response = requests.put(
-        api_url,
-        headers=headers,
-        json=payload,
-        timeout=20,
-    )
-
-    if response.status_code not in (200, 201):
-        return False, (
-            f"GitHub 저장 실패: HTTP {response.status_code} - "
-            f"{response.text[:500]}"
-        )
-
-    action = "갱신" if sha else "생성"
-    return True, f"`{path}` 파일을 GitHub에 {action}했습니다."
-
-
 @st.cache_data(ttl="1h", show_spinner=False)
 def load_online_history() -> pd.DataFrame:
     return fetch_lotto_history()
@@ -219,6 +136,25 @@ st.markdown(
         letter-spacing: -0.02em;
         white-space: nowrap;
     }}
+    .lotto-result-grid {{
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 8px;
+        margin: 0.65rem 0 0.7rem 0;
+    }}
+    .lotto-result-grid .lotto-summary-card {{
+        padding: 10px 11px;
+    }}
+    .lotto-result-grid .lotto-summary-label {{
+        white-space: normal;
+        min-height: 2.05rem;
+        font-size: 0.72rem;
+        line-height: 1.35;
+        margin-bottom: 4px;
+    }}
+    .lotto-result-grid .lotto-summary-value {{
+        font-size: 1.30rem;
+    }}
     .lotto-formula-note {{
         font-size: 0.92rem;
         line-height: 1.65;
@@ -231,6 +167,19 @@ st.markdown(
         }}
         .lotto-summary-value {{
             font-size: 1.28rem;
+        }}
+        .lotto-result-grid {{
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 6px;
+        }}
+        .lotto-result-grid .lotto-summary-card {{
+            padding: 9px 8px;
+        }}
+        .lotto-result-grid .lotto-summary-label {{
+            font-size: 0.68rem;
+        }}
+        .lotto-result-grid .lotto-summary-value {{
+            font-size: 1.12rem;
         }}
     }}
     </style>
@@ -327,10 +276,25 @@ with left:
         game_df = pd.DataFrame(game_rows)
         st.dataframe(game_df, hide_index=True, use_container_width=True)
 
-        c1, c2, c3 = st.columns(3)
-        c1.metric("사용한 서로 다른 번호", f"{meta['unique_numbers']} / 45")
-        c2.metric("중복 사용 자리", f"{meta['repeat_slots']}개")
-        c3.metric("평균 기본 점수", f"{meta['mean_base_score']:.1f}")
+        st.markdown(
+            f"""
+            <div class="lotto-result-grid">
+                <div class="lotto-summary-card">
+                    <div class="lotto-summary-label">사용한 서로 다른 번호</div>
+                    <div class="lotto-summary-value">{meta['unique_numbers']} / 45</div>
+                </div>
+                <div class="lotto-summary-card">
+                    <div class="lotto-summary-label">중복 사용 자리</div>
+                    <div class="lotto-summary-value">{meta['repeat_slots']}개</div>
+                </div>
+                <div class="lotto-summary-card">
+                    <div class="lotto-summary-label">평균 기본 점수</div>
+                    <div class="lotto-summary-value">{meta['mean_base_score']:.1f}</div>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
         repeated = meta["repeated_numbers"]
         if repeated:
@@ -341,94 +305,6 @@ with left:
         else:
             st.caption("5게임 전체에서 중복 번호가 없습니다.")
 
-        export_rows = []
-        for idx, game in enumerate(games, 1):
-            export_rows.append(
-                {
-                    "latest_draw": latest_draw,
-                    "latest_date": latest_date.isoformat(),
-                    "game": idx,
-                    "numbers": " ".join(map(str, game)),
-                }
-            )
-        export_df = pd.DataFrame(export_rows)
-
-        # 저장 시점과 생성 조건도 함께 남깁니다.
-        generated_date = pd.Timestamp.now(tz=ZoneInfo("Asia/Seoul")).date()
-        export_df.insert(0, "generated_date", generated_date.isoformat())
-        export_df["all_weight"] = round(weights["all"], 4)
-        export_df["year_weight"] = round(weights["year"], 4)
-        export_df["recent20_weight"] = round(weights["recent20"], 4)
-        export_df["repeat_factor"] = repeat_factor
-        export_df["max_usage"] = max_usage
-        export_df["randomness"] = randomness
-
-        csv_bytes = export_df.to_csv(index=False).encode("utf-8-sig")
-        iso_year, iso_week, _ = generated_date.isocalendar()
-        week_key = f"{iso_year}-W{iso_week:02d}"
-        weekly_filename = f"{week_key}_based_on_draw_{latest_draw}.csv"
-        github_path = f"history/{weekly_filename}"
-
-        dl_col, git_col = st.columns(2)
-
-        with dl_col:
-            st.download_button(
-                "이번 주 번호 CSV 저장",
-                data=csv_bytes,
-                file_name=weekly_filename,
-                mime="text/csv",
-                use_container_width=True,
-            )
-
-        with git_col:
-            github_cfg = get_github_config()
-
-            if github_cfg is None:
-                st.button(
-                    "GitHub에 저장",
-                    disabled=True,
-                    use_container_width=True,
-                    help="Streamlit Secrets에 GitHub 설정을 먼저 등록해야 합니다.",
-                )
-            else:
-                save_password = st.text_input(
-                    "GitHub 저장 비밀번호",
-                    type="password",
-                    key="github_save_password",
-                    placeholder="저장 비밀번호",
-                    label_visibility="collapsed",
-                )
-
-                if st.button(
-                    "GitHub에 저장",
-                    use_container_width=True,
-                    type="secondary",
-                ):
-                    if not hmac.compare_digest(
-                        save_password,
-                        github_cfg["password"],
-                    ):
-                        st.error("저장 비밀번호가 맞지 않습니다.")
-                    else:
-                        commit_message = (
-                            f"Save lotto games for {week_key} "
-                            f"(based on draw {latest_draw})"
-                        )
-                        try:
-                            ok, message = save_weekly_csv_to_github(
-                                csv_bytes=csv_bytes,
-                                path=github_path,
-                                commit_message=commit_message,
-                                cfg=github_cfg,
-                            )
-                        except requests.RequestException as exc:
-                            ok = False
-                            message = f"GitHub 연결 오류: {exc}"
-
-                        if ok:
-                            st.success(message)
-                        else:
-                            st.error(message)
 
 with right:
     st.subheader("번호 점수 TOP 15")
