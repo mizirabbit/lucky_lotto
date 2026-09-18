@@ -306,7 +306,7 @@ def generate_portfolio(
 
     scores = score_table.set_index("number")["score_raw"].astype(float).to_dict()
     if set(scores) != set(range(1, 46)):
-        raise ValueError("score_table에는 1~45 번호가 모두 있어야 합니다.")
+        raise ValueError("score_table에는 1-45 번호가 모두 있어야 합니다.")
 
     rng = np.random.default_rng(seed)
 
